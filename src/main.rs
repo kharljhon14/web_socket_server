@@ -1,5 +1,7 @@
-use routes::chat_room::{chat, ChatRoom};
+use messages::chat_message::ChatRoom;
+use routes::chat_room::chat;
 
+mod messages;
 mod routes;
 
 #[rocket::main]
