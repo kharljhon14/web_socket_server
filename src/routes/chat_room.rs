@@ -9,12 +9,17 @@ pub async fn chat<'r>(ws: WebSocket, state: &'r State<ChatRoom>) -> Channel<'r> 
         Box::pin(async move {
             let (ws_sink, mut ws_stream) = stream.split();
             let connection_id = rand::random::<usize>();
-            state.add(connection_id, ws_sink).await;
-            state.broadcast_users().await;
+
+            if let Some(message) = ws_stream.next().await {
+                if let Ok(message_contents) = message {
+                    handle_incoming_message(message_contents, state, Some(ws_sink), connection_id)
+                        .await;
+                }
+            }
 
             while let Some(message) = ws_stream.next().await {
                 if let Ok(message_contents) = message {
-                    handle_incoming_message(message_contents, state, connection_id).await;
+                    handle_incoming_message(message_contents, state, None, connection_id).await;
                 }
             }
             Ok(())

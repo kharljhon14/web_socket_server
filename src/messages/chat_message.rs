@@ -14,7 +14,7 @@ use super::websocket_message::{MessageType, WebSocketMessage};
 
 #[derive(Default)]
 pub struct ChatRoom {
-    connections: Mutex<HashMap<usize, SplitSink<DuplexStream, Message>>>,
+    connections: Mutex<HashMap<usize, ChatRoomConnection>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -24,18 +24,25 @@ pub struct ChatMessage {
     pub created_at: NaiveDateTime,
 }
 
+pub struct ChatRoomConnection {
+    username: String,
+    sink: SplitSink<DuplexStream, Message>,
+}
+
 impl ChatRoom {
-    pub async fn add(&self, id: usize, sink: SplitSink<DuplexStream, Message>) {
+    pub async fn add(&self, id: usize, username: String, sink: SplitSink<DuplexStream, Message>) {
         let result = {
             let mut connections = self.connections.lock().await;
 
             let chat_message = ChatMessage {
-                messsage: format!("New user joins"),
+                messsage: format!("{} joins the chat", username),
                 author: "System".to_string(),
                 created_at: Utc::now().naive_utc(),
             };
 
-            connections.insert(id, sink);
+            let connection = ChatRoomConnection { username, sink };
+
+            connections.insert(id, connection);
 
             Some(chat_message)
         };
@@ -51,11 +58,13 @@ impl ChatRoom {
         let websocket_message = WebSocketMessage {
             message_type: MessageType::NewMessage,
             message: Some(chat_message),
+            username: None,
             users: None,
         };
 
         for (_id, connection) in connections.iter_mut() {
             let _ = connection
+                .sink
                 .send(Message::text(json!(websocket_message).to_string()))
                 .await;
         }
@@ -66,16 +75,19 @@ impl ChatRoom {
 
         let users = connections
             .iter()
-            .map(|(id, _connection)| id.to_string())
+            .map(|(_id, connection)| connection.username.to_owned())
             .collect::<Vec<String>>();
+
         let websocket_message = WebSocketMessage {
             message_type: MessageType::UserList,
             message: None,
+            username: None,
             users: Some(users),
         };
 
         for (_id, connection) in connections.iter_mut() {
             let _ = connection
+                .sink
                 .send(Message::Text(json!(websocket_message).to_string()))
                 .await;
         }
@@ -85,7 +97,8 @@ impl ChatRoom {
 pub async fn handle_incoming_message(
     message_contents: Message,
     state: &State<ChatRoom>,
-    _connection_id: usize,
+    sink: Option<SplitSink<DuplexStream, Message>>,
+    connection_id: usize,
 ) {
     match message_contents {
         Message::Text(json) => {
@@ -95,6 +108,20 @@ pub async fn handle_incoming_message(
                         if let Some(message) = websocket_message.message {
                             state.broadcast_message(message).await;
                         }
+                    }
+                    MessageType::NewUser => {
+                        let username = match websocket_message.username {
+                            Some(username) => username,
+                            None => return,
+                        };
+
+                        let ws_sink = match sink {
+                            Some(ws_sink) => ws_sink,
+                            None => return,
+                        };
+
+                        state.add(connection_id, username, ws_sink).await;
+                        state.broadcast_users().await;
                     }
                     _ => {}
                 }
